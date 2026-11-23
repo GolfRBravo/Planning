@@ -155,7 +155,11 @@ with st.sidebar:
     user_name = st.text_input("Naam voor bestand", "BOUCHE G")
     auto_find_name = st.checkbox("Zoek rij automatisch op naam", value=True)
     row_input = st.number_input("Rij-index in Excel", min_value=1, value=64)
-    month_input = st.text_input("Maand(en) (gescheiden door komma)", "januari")
+    selected_months = st.multiselect(
+        "Selecteer maand(en)",
+        options=list(all_months.keys()),
+        default=["januari"]
+    )
 
 uploaded_file = st.file_uploader("Kies een Excel bestand", type=["xlsx", "xls"])
 
@@ -163,8 +167,6 @@ if uploaded_file and st.button("Genereer Kalender"):
     try:
         excel_file = pd.ExcelFile(uploaded_file)
         sheet_map = {sheet.strip().lower(): sheet for sheet in excel_file.sheet_names}
-
-        selected_months = [m.strip().lower() for m in month_input.split(",")]
         all_output_events = []
 
         for m_name in selected_months:
