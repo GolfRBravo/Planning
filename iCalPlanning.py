@@ -4,12 +4,12 @@ from datetime import datetime, timedelta
 from pytz import timezone
 from ics import Calendar, Event
 
-# --- CONFIGURATIE ---
+# --- CONFIGURATIE & SECRETS ---
 LOCAL_TIMEZONE = timezone("Europe/Brussels")
 
-APP_LOGIN = st.secrets.get("APP_LOGIN", "PZ5911")
-APP_PASSWORD = st.secrets.get("APP_PASSWORD", "5420")
-legend = dict(st.secrets["legende_data"]) if "legende_data" in st.secrets else {}
+APP_LOGIN = st.secrets["APP_LOGIN"]
+APP_PASSWORD = st.secrets["APP_PASSWORD"]
+legend = dict(st.secrets["legende_data"])
 
 def check_password():
     if "password_correct" not in st.session_state:
@@ -100,26 +100,47 @@ def extract_year_from_c9(df, fallback_year=2027):
         pass
     return fallback_year
 
+def parse_day_number(val):
+    """Haalt een geldige dag (1-31) uit een cel."""
+    if pd.isna(val):
+        return None
+    if isinstance(val, (datetime, pd.Timestamp)):
+        return int(val.day)
+    if isinstance(val, (int, float)):
+        num = int(val)
+        return num if 1 <= num <= 31 else None
+    text = str(val).strip()
+    if text.isdigit():
+        num = int(text)
+        return num if 1 <= num <= 31 else None
+    return None
+
 def find_date_row_and_col(df):
-    """Zoekt automatisch de rij en startkolom waar de dagen (1, 2, 3...) staan."""
-    for r_idx in range(min(20, len(df))):
+    """Zoekt eerst in rij 9 en 10 (index 8 en 9), daarna breder, naar de rij met dagen en startkolom."""
+    candidate_rows = [8, 9] + [r for r in range(min(25, len(df))) if r not in (8, 9)]
+    for r_idx in candidate_rows:
+        if r_idx >= len(df):
+            continue
         row = df.iloc[r_idx]
-        for c_idx in range(min(10, len(row) - 2)):
-            v1, v2, v3 = row.iloc[c_idx], row.iloc[c_idx + 1], row.iloc[c_idx + 2]
-            if (
-                isinstance(v1, (int, float)) and not pd.isna(v1) and int(v1) == 1
-                and isinstance(v2, (int, float)) and not pd.isna(v2) and int(v2) == 2
-                and isinstance(v3, (int, float)) and not pd.isna(v3) and int(v3) == 3
-            ):
-                return r_idx, c_idx
-    return 7, 3  # Fallback naar rij 8, kolom D
+        for c_idx in range(len(row)):
+            d1 = parse_day_number(row.iloc[c_idx])
+            if d1 == 1:
+                valid_seq = 1
+                for offset in range(1, 5):
+                    if c_idx + offset < len(row):
+                        d_next = parse_day_number(row.iloc[c_idx + offset])
+                        if d_next == 1 + offset:
+                            valid_seq += 1
+                if valid_seq >= 2:
+                    return r_idx, c_idx
+    return 8, 3
 
 def find_user_row(df, search_name, fallback_row_1based):
     """Zoekt de rij van de gebruiker op naam; valt terug op het ingevulde rijnummer."""
     target = search_name.strip().lower()
     if target:
         for r_idx in range(len(df)):
-            row_text = " ".join(str(x).strip().lower() for x in df.iloc[r_idx, :4] if pd.notna(x))
+            row_text = " ".join(str(x).strip().lower() for x in df.iloc[r_idx, :6] if pd.notna(x))
             if target in row_text:
                 return r_idx
     return fallback_row_1based - 1
@@ -131,11 +152,10 @@ st.markdown(f"Welkom, **{APP_LOGIN}**. Upload je Excel-planning en download dire
 
 with st.sidebar:
     st.header("Instellingen")
-    user_name = st.text_input("Naam in rooster / voor bestand", "BOUCHE G")
+    user_name = st.text_input("Naam voor bestand", "BOUCHE G")
     auto_find_name = st.checkbox("Zoek rij automatisch op naam", value=True)
-    row_input = st.number_input("Rij-index in Excel (fallback)", min_value=1, value=64)
-    month_options = list(all_months.keys())
-    selected_months = st.multiselect("Selecteer maand(en)", month_options, default=["januari"])
+    row_input = st.number_input("Rij-index in Excel", min_value=1, value=64)
+    month_input = st.text_input("Maand(en) (gescheiden door komma)", "januari")
 
 uploaded_file = st.file_uploader("Kies een Excel bestand", type=["xlsx", "xls"])
 
@@ -143,6 +163,8 @@ if uploaded_file and st.button("Genereer Kalender"):
     try:
         excel_file = pd.ExcelFile(uploaded_file)
         sheet_map = {sheet.strip().lower(): sheet for sheet in excel_file.sheet_names}
+
+        selected_months = [m.strip().lower() for m in month_input.split(",")]
         all_output_events = []
 
         for m_name in selected_months:
@@ -151,13 +173,8 @@ if uploaded_file and st.button("Genereer Kalender"):
                 month_num = all_months[m_name]
                 df = pd.read_excel(uploaded_file, sheet_name=actual_sheet, header=None)
 
-                # 1. Lees jaar uit C9 (rij 9, kolom C)
                 year = extract_year_from_c9(df, fallback_year=2027)
-
-                # 2. Vind automatisch de rij met dagen (1, 2, 3...) en de startkolom
                 date_row_idx, start_col_idx = find_date_row_and_col(df)
-
-                # 3. Vind jouw rij (op naam of op rijnummer)
                 user_row_idx = (
                     find_user_row(df, user_name, row_input)
                     if auto_find_name
@@ -167,13 +184,13 @@ if uploaded_file and st.button("Genereer Kalender"):
                 dates = df.iloc[date_row_idx, start_col_idx:]
                 events = df.iloc[user_row_idx, start_col_idx:]
 
-                for day, code in zip(dates, events):
-                    if pd.notna(day) and pd.notna(code):
-                        if isinstance(day, (datetime, pd.Timestamp)):
-                            day = day.day
-                        if isinstance(day, (int, float)) and 1 <= int(day) <= 31:
-                            event_date = datetime(year, month_num, int(day))
-                            ev_data = process_event(event_date, str(code), legend)
+                for day_val, code in zip(dates, events):
+                    day = parse_day_number(day_val)
+                    if day is not None and pd.notna(code):
+                        code_str = str(code).strip()
+                        if code_str:
+                            event_date = datetime(year, month_num, day)
+                            ev_data = process_event(event_date, code_str, legend)
                             ev_data["dtstart"] = convert_to_local_time(ev_data["dtstart"])
                             ev_data["dtend"] = convert_to_local_time(ev_data["dtend"])
                             all_output_events.append(ev_data)
@@ -190,10 +207,11 @@ if uploaded_file and st.button("Genereer Kalender"):
                 )
                 cal.events.add(e)
 
+            ics_data = str(cal)
             st.success(f"Klaar! {len(all_output_events)} diensten gevonden.")
             st.download_button(
                 label="📥 Download .ics bestand",
-                data=str(cal),
+                data=ics_data,
                 file_name=f"{user_name}_planning.ics",
                 mime="text/calendar",
             )
